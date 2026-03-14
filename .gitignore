@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Large model files (too big for GitHub)
+models/
+*.bin
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+
+# Datasets (too large for GitHub, keep them local)
+data/raw/
+data/processed/*.csv
+
+# BUT keep the label maps (small JSON files — useful to track)
+!data/processed/label2id.json
+!data/processed/id2label.json
+
+# API keys / secrets
+.env
+secrets.json
+config.json
+
+# VS Code settings
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Outputs (generated, not source code)
+outputs/
