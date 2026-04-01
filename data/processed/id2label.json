@@ -1,0 +1,14 @@
+{
+  "0": "FR",
+  "1": "NFR_Legal",
+  "2": "NFR_LookAndFeel",
+  "3": "NFR_Maintainability",
+  "4": "NFR_Operational",
+  "5": "NFR_Other",
+  "6": "NFR_Performance",
+  "7": "NFR_Portability",
+  "8": "NFR_Reliability",
+  "9": "NFR_Scalability",
+  "10": "NFR_Security",
+  "11": "NFR_Usability"
+}
