@@ -1,14 +1,15 @@
 {
-  "FR": 0,
-  "NFR_Legal": 1,
-  "NFR_LookAndFeel": 2,
-  "NFR_Maintainability": 3,
-  "NFR_Operational": 4,
-  "NFR_Other": 5,
-  "NFR_Performance": 6,
-  "NFR_Portability": 7,
-  "NFR_Reliability": 8,
-  "NFR_Scalability": 9,
-  "NFR_Security": 10,
-  "NFR_Usability": 11
+  "Ambiguous": 0,
+  "FR": 1,
+  "NFR_Legal": 2,
+  "NFR_LookAndFeel": 3,
+  "NFR_Maintainability": 4,
+  "NFR_Operational": 5,
+  "NFR_Other": 6,
+  "NFR_Performance": 7,
+  "NFR_Portability": 8,
+  "NFR_Reliability": 9,
+  "NFR_Scalability": 10,
+  "NFR_Security": 11,
+  "NFR_Usability": 12
 }
