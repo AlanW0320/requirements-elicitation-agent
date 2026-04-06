@@ -1,0 +1,15 @@
+{
+  "0": "Ambiguous",
+  "1": "FR",
+  "2": "NFR_Legal",
+  "3": "NFR_LookAndFeel",
+  "4": "NFR_Maintainability",
+  "5": "NFR_Operational",
+  "6": "NFR_Other",
+  "7": "NFR_Performance",
+  "8": "NFR_Portability",
+  "9": "NFR_Reliability",
+  "10": "NFR_Scalability",
+  "11": "NFR_Security",
+  "12": "NFR_Usability"
+}
