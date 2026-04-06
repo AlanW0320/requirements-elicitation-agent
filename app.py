@@ -2,20 +2,22 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
-import time
 import json
 from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from agent.classifier    import classify_requirement
+from agent.classifier    import classify_requirement, gpt_second_opinion
 from agent.clarification import (
-    analyze_ambiguity, generate_clarification_questions,
-    refine_requirement, auto_refine_ambiguous, check_and_fix_requirement
+    analyze_ambiguity,
+    generate_clarification_questions,
+    refine_requirement,
+    auto_refine_ambiguous,
+    check_and_fix_requirement,
+    split_and_validate_input,
 )
 from agent.srs_generator import generate_srs_from_registry
-from agent.classifier    import gpt_second_opinion
 
 # ── Page config ───────────────────────────────────────────────────────────
 st.set_page_config(
@@ -24,7 +26,7 @@ st.set_page_config(
     layout     = "wide"
 )
 
-# ── Registry helper ───────────────────────────────────────────────────────
+# ── Registry helpers ──────────────────────────────────────────────────────
 DB_PATH = './data/requirements_registry.db'
 
 def get_registry_df(project_name):
@@ -34,8 +36,8 @@ def get_registry_df(project_name):
         (project_name,)
     ).fetchall()
     conn.close()
-    cols = ['id','original_text','final_text','label',
-            'confidence','iterations','status','timestamp','project_name']
+    cols = ['id', 'original_text', 'final_text', 'label',
+            'confidence', 'iterations', 'status', 'timestamp', 'project_name']
     return pd.DataFrame(rows, columns=cols)
 
 def add_to_registry(result, project_name):
@@ -52,8 +54,8 @@ def add_to_registry(result, project_name):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             result['original_text'], result['final_text'],
-            result['label'], result['confidence'],
-            result['iterations'], result['status'],
+            result['label'],         result['confidence'],
+            result['iterations'],    result['status'],
             datetime.now().isoformat(), project_name
         ))
         conn.commit()
@@ -65,23 +67,24 @@ def clear_registry(project_name):
     conn.commit()
     conn.close()
 
-# ── Session state init ────────────────────────────────────────────────────
-if 'project_name'    not in st.session_state:
-    st.session_state.project_name    = "My Project"
-if 'current_input'   not in st.session_state:
-    st.session_state.current_input   = None
-if 'questions'       not in st.session_state:
-    st.session_state.questions       = []
-if 'analysis'        not in st.session_state:
-    st.session_state.analysis        = None
-if 'awaiting_answers' not in st.session_state:
-    st.session_state.awaiting_answers = False
-if 'iteration'       not in st.session_state:
-    st.session_state.iteration       = 0
-if 'refined_text'    not in st.session_state:
-    st.session_state.refined_text    = None
-if 'registry_updated' not in st.session_state:
-    st.session_state.registry_updated = False
+# ── Session state initialisation ──────────────────────────────────────────
+defaults = {
+    'project_name'          : 'My Project',
+    'current_input'         : None,
+    'questions'             : [],
+    'analysis'              : None,
+    'awaiting_answers'      : False,
+    'iteration'             : 0,
+    'refined_text'          : None,
+    'registry_updated'      : False,
+    'mode'                  : 'Interactive',
+    # pending_clarifications: list of dicts for interactive clarification
+    # each dict: {text, reason, index, questions, analysis}
+    'pending_clarifications': [],
+}
+for key, val in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
 
 # ── Sidebar ───────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -97,7 +100,8 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Registry")
-    
+
+    # Always read fresh — reflects latest inserts immediately after st.rerun()
     sidebar_df = get_registry_df(project_name)
 
     col_m1, col_m2 = st.columns(2)
@@ -106,18 +110,14 @@ with st.sidebar:
 
     col_m3, col_m4 = st.columns(2)
     col_m3.metric("FR",  len(sidebar_df[sidebar_df['label'] == 'FR']))
-    col_m4.metric("NFR", len(sidebar_df[sidebar_df['label'].str.startswith('NFR_', na=False)]))
-
-    # st.metric("Total Requirements", len(df))
-    # if not df.empty:
-    #     classified = len(df[df['status'] == 'classified'])
-    #     clarified  = len(df[df['status'] == 'clarified'])
-    #     st.metric("Classified directly", classified)
-    #     st.metric("Clarified via agent", clarified)
+    col_m4.metric("NFR", len(sidebar_df[
+        sidebar_df['label'].str.startswith('NFR_', na=False)
+    ]))
 
     if st.button("<placeholder> Clear Registry", type="secondary"):
         clear_registry(project_name)
-        st.session_state.registry_updated = False
+        st.session_state.registry_updated      = False
+        st.session_state.pending_clarifications = []
         st.success("Registry cleared")
         st.rerun()
 
@@ -129,11 +129,10 @@ with st.sidebar:
 st.title("AI Requirements Elicitation Agent")
 st.caption("Classify, clarify, and document software requirements automatically")
 
-# ── Tabs ──────────────────────────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs([
     "<placeholder> Elicit Requirements",
     "<placeholder> Requirements Registry",
-    "<placeholder> Generate SRS"
+    "<placeholder> Generate SRS",
 ])
 
 # ════════════════════════════════════════════════════════════════════════
@@ -146,7 +145,9 @@ with tab1:
     with col1:
         user_input = st.text_area(
             "Requirement",
-            placeholder="e.g. The system shall allow users to reset their password via email.",
+            placeholder=(
+                "e.g. The system shall allow users to reset their password via email."
+            ),
             height=100,
             key="requirement_input"
         )
@@ -156,202 +157,261 @@ with tab1:
             "Processing mode",
             ["Interactive", "Auto"],
             help=(
-                "Interactive: agent asks you clarification questions\n"
-                "Auto: GPT auto-refines vague requirements"
+                "Interactive: agent asks clarification questions\n"
+                "\nAuto: GPT auto-refines vague requirements"
             )
         )
 
     classify_btn = st.button("<placeholder> Classify Requirement", type="primary")
 
-    # ── Classification ────────────────────────────────────────────────────
+    # ── New submission — reset all state ──────────────────────────────────
     if classify_btn and user_input.strip():
-        # ── Reset ALL session state for fresh requirement ─────────────────
-        st.session_state.current_input     = user_input.strip()
-        st.session_state.awaiting_answers  = False
-        st.session_state.questions         = []
-        st.session_state.analysis          = None
-        st.session_state.iteration         = 0
-        st.session_state.refined_text      = None
-        st.session_state.pending_requirements = []
-        st.session_state.mode              = mode  # save mode at classification time
+        st.session_state.current_input          = user_input.strip()
+        st.session_state.awaiting_answers       = False
+        st.session_state.questions              = []
+        st.session_state.analysis               = None
+        st.session_state.iteration              = 0
+        st.session_state.refined_text           = None
+        st.session_state.mode                   = mode
+        st.session_state.pending_clarifications = []   # clear previous pending
 
-        with st.spinner("Classifying..."):
-            label, confidence, all_probs = classify_requirement(user_input.strip())
+        # ── Step 1: Split compound requirements ───────────────────────────
+        with st.spinner("Analyzing input..."):
+            split_result = split_and_validate_input(user_input.strip())
 
-        st.session_state.last_label      = label
-        st.session_state.last_confidence = confidence
-        st.session_state.all_probs       = all_probs
-        
-        # Show confidence chart
-        st.markdown("#### Classification Result")
-        col_a, col_b = st.columns(2)
+        requirements_to_process = split_result.get('requirements', [])
+        was_split               = split_result.get('was_split', False)
 
-        with col_a:
-            if label == 'Ambiguous':
-                st.warning(f"<placeholder> **Ambiguous** (confidence: {confidence:.2%})")
-            else:
-                st.success(f"<placeholder> **{label}** (confidence: {confidence:.2%})")
-
-        with col_b:
-            top_probs = dict(sorted(
-                all_probs.items(), key=lambda x: x[1], reverse=True
-            )[:5])
-            prob_df = pd.DataFrame(
-                list(top_probs.items()),
-                columns=['Label', 'Probability']
+        if was_split:
+            st.info(
+                f"<placeholder> Input contains **{split_result['split_count']} requirements** "
+                f"— processing each separately."
             )
-            st.dataframe(prob_df, hide_index=True, use_container_width=True)
 
-        # ── Handle ambiguous ──────────────────────────────────────────────
-        if label == 'Ambiguous':
-            if mode == "Auto":
-                with st.spinner("Auto-refining with GPT..."):
-                    gpt_label     = gpt_second_opinion(user_input.strip())
-                    final_label   = gpt_label if gpt_label and gpt_label != 'Ambiguous' else 'NFR_Other'
-                    refined, assumption = auto_refine_ambiguous(user_input.strip(), final_label)
-                    bert_label, bert_conf, _ = classify_requirement(refined)
-                    if bert_label != 'Ambiguous' and bert_conf >= 0.75:
-                        final_label = bert_label
+        # ── Step 2: Process each requirement ─────────────────────────────
+        # Collect all results first — only rerun AFTER the loop is complete
+        needs_rerun = False
 
-                st.info(f"<placeholder> **Assumed:** {assumption}")
-                st.success(f"<placeholder> **Refined:** {refined}")
-                st.success(f"<placeholder> **Label:** {final_label}")
+        for i, req_item in enumerate(requirements_to_process):
+            req_text = req_item['text']        # ← use req_text, NOT user_input
+            is_vague = req_item.get('is_vague', False)
+            reason   = req_item.get('reason', '')
+
+            st.divider()
+
+            if len(requirements_to_process) > 1:
+                st.markdown(f"**Requirement {i + 1} of {len(requirements_to_process)}:**")
+
+            st.markdown(f"<placeholder> `{req_text}`")
+
+            # ── Classify this individual requirement ──────────────────────
+            with st.spinner("Classifying..."):
+                label, confidence, all_probs = classify_requirement(req_text)
+
+            # Show result
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if label == 'Ambiguous' or is_vague:
+                    st.warning(
+                        f"<placeholder> **Ambiguous** (confidence: {confidence:.2%})"
+                        + (f" — {reason}" if reason else "")
+                    )
+                else:
+                    st.success(f"<placeholder> **{label}** ({confidence:.2%})")
+            with col_b:
+                top_probs = dict(sorted(
+                    all_probs.items(), key=lambda x: x[1], reverse=True
+                )[:5])
+                prob_df = pd.DataFrame(
+                    list(top_probs.items()), columns=['Label', 'Probability']
+                )
+                st.dataframe(prob_df, hide_index=True, use_container_width=True)
+
+            # ── Route: Ambiguous or vague ─────────────────────────────────
+            if label == 'Ambiguous' or is_vague:
+
+                if mode == "Auto":
+                    # Auto-refine without asking the user
+                    with st.spinner("Auto-refining with GPT..."):
+                        gpt_label   = gpt_second_opinion(req_text)
+                        final_label = (
+                            gpt_label
+                            if gpt_label and gpt_label != 'Ambiguous'
+                            else 'NFR_Other'
+                        )
+                        refined, assumption = auto_refine_ambiguous(req_text, final_label)
+                        bert_label, bert_conf, _ = classify_requirement(refined)
+                        if bert_label != 'Ambiguous' and bert_conf >= 0.75:
+                            final_label = bert_label
+                        else:
+                            bert_conf = confidence
+
+                    if assumption:
+                        st.info(f"<placeholder> **Assumed:** {assumption}")
+                    st.success(f"<placeholder> **Refined:** {refined}")
+                    st.success(f"<placeholder> **Label:** {final_label}")
+
+                    # Quality / grammar check
+                    with st.spinner("Checking requirement quality..."):
+                        fixed_text, was_changed, issues = check_and_fix_requirement(refined)
+
+                    if was_changed:
+                        st.warning("<placeholder> **Quality issues detected and fixed:**")
+                        for issue in issues:
+                            st.markdown(f"  - {issue}")
+                        st.markdown(f"**Original:** {refined}")
+                        st.markdown(f"**Fixed:**    {fixed_text}")
+                        refined = fixed_text
+
+                    result = {
+                        'original_text': user_input.strip(),
+                        'final_text'   : refined,
+                        'label'        : final_label,
+                        'confidence'   : bert_conf,
+                        'iterations'   : 1,
+                        'status'       : 'clarified',
+                    }
+                    add_to_registry(result, project_name)
+                    st.success("<placeholder> Added to registry")
+                    needs_rerun = True
+
+                else:
+                    # Interactive mode — queue for clarification form below.
+                    # Generate questions NOW and store them in session state
+                    # so they are not regenerated on every Streamlit rerun.
+                    with st.spinner("Generating clarification questions..."):
+                        analysis  = analyze_ambiguity(req_text)
+                        questions = generate_clarification_questions(req_text, analysis)
+
+                    st.session_state.pending_clarifications.append({
+                        'text'     : req_text,
+                        'reason'   : reason,
+                        'index'    : i,
+                        'analysis' : analysis,
+                        'questions': questions,       # stored — not regenerated
+                    })
+                    st.warning(
+                        "<placeholder> This requirement needs clarification — "
+                        "scroll down to answer the questions."
+                    )
+
+            # ── Route: Clear requirement ──────────────────────────────────
+            else:
+                # Grammar + completeness check
+                with st.spinner("Checking requirement quality..."):
+                    fixed_text, was_changed, issues = check_and_fix_requirement(req_text)
+
+                if was_changed:
+                    st.warning("<placeholder> **Quality issues detected and fixed:**")
+                    for issue in issues:
+                        st.markdown(f"  - {issue}")
+                    st.markdown(f"**Original:** {req_text}")
+                    st.markdown(f"**Fixed:**    {fixed_text}")
+                    req_text = fixed_text      # use the fixed version
 
                 result = {
                     'original_text': user_input.strip(),
-                    'final_text'   : refined,
-                    'label'        : final_label,
-                    'confidence'   : bert_conf if bert_label != 'Ambiguous' else confidence,
+                    'final_text'   : req_text,   # ← fixed text, not raw input
+                    'label'        : label,
+                    'confidence'   : confidence,
                     'iterations'   : 1,
-                    'status'       : 'clarified'
+                    'status'       : 'classified',
                 }
                 add_to_registry(result, project_name)
-                # ── Force sidebar to update immediately ───────────────────
-                st.session_state.registry_updated = True
-                st.rerun()
-                st.success("<placeholder> Added to registry")
+                st.success(f"<placeholder> Added to registry as **{label}**")
+                needs_rerun = True
 
-            else:
-                # Interactive mode — generate questions
-                with st.spinner("Analyzing ambiguity..."):
-                    analysis  = analyze_ambiguity(user_input.strip())
-                    questions = generate_clarification_questions(
-                        user_input.strip(), analysis
-                    )
-                st.session_state.analysis         = analysis
-                st.session_state.questions        = questions
-                st.session_state.awaiting_answers = True
-                st.session_state.iteration        = 1
-
-        else:
-            # Clear requirement — save directly
-            result = {
-                'original_text': user_input.strip(),
-                'final_text'   : user_input.strip(),
-                'label'        : label,
-                'confidence'   : confidence,
-                'iterations'   : 1,
-                'status'       : 'classified'
-            }
-            add_to_registry(result, project_name)
-            # ── Force sidebar to update immediately ───────────────────────
+        # ── Rerun ONCE after the entire loop — not inside it ─────────────
+        # Only rerun if there are no pending clarifications to show.
+        # If there are pending clarifications we stay on the page to show forms.
+        if needs_rerun and not st.session_state.pending_clarifications:
             st.session_state.registry_updated = True
             st.rerun()
-            st.success("<placeholder> Added to registry")
 
-    # ── Clarification questions form ──────────────────────────────────────
-    if st.session_state.awaiting_answers and st.session_state.questions:
+    # ── Clarification forms — shown BELOW the classify button ─────────────
+    # Render when there are pending interactive clarifications.
+    # Questions are already stored in session state — no extra API calls.
+    if st.session_state.pending_clarifications:
         st.divider()
-        st.markdown(
-            f"#### <placeholder> Clarification Needed "
-            f"(Iteration {st.session_state.iteration}/{3})"
-        )
-        st.info(
-            f"**Issue:** {st.session_state.analysis.get('summary', '')}"
-        )
+        st.markdown("### <placeholder> Clarification Required")
 
-        answers = []
+        # Process one pending item at a time to keep the UI clean
+        pending = st.session_state.pending_clarifications[0]
+
+        st.markdown(
+            f"**Requirement {pending['index'] + 1}:** `{pending['text']}`"
+        )
+        if pending.get('reason'):
+            st.info(f"**Issue:** {pending['reason']}")
+
+        questions = pending['questions']
+
+        st.markdown("Please answer the following clarification questions:")
+
         with st.form("clarification_form"):
-            for i, q in enumerate(st.session_state.questions):
+            answers = []
+            for i, q in enumerate(questions):
                 answer = st.text_input(
-                    f"Q{i+1}: {q['question']}",
-                    key=f"answer_{i}"
+                    f"Q{i + 1}: {q['question']}",
+                    key=f"answer_{pending['index']}_{i}"
                 )
                 answers.append(answer)
 
-            submitted = st.form_submit_button("Submit Answers", type="primary")
+            submitted = st.form_submit_button("<placeholder> Submit Answers", type="primary")
 
         if submitted:
-            current_text = (
-                st.session_state.refined_text
-                or st.session_state.current_input
-            )
+            current_text = pending['text']
 
-            with st.spinner("Refining requirement..."):
-                refinement   = refine_requirement(
-                    current_text,
-                    st.session_state.questions,
-                    answers
-                )
+            with st.spinner("Refining requirement based on your answers..."):
+                refinement   = refine_requirement(current_text, questions, answers)
                 refined_text = refinement['refined_requirement']
                 label, conf, _ = classify_requirement(refined_text)
 
-            st.session_state.refined_text = refined_text
-
-            st.markdown(f"**<placeholder> Refined:** {refined_text}")
-
-            if label != 'Ambiguous':
-                st.success(f"<placeholder> Classified as **{label}** ({conf:.2%})")
-                st.session_state.awaiting_answers = False
-
-                result = {
-                    'original_text': st.session_state.current_input,
-                    'final_text'   : refined_text,
-                    'label'        : label,
-                    'confidence'   : conf,
-                    'iterations'   : st.session_state.iteration,
-                    'status'       : 'clarified'
-                }
-                add_to_registry(result, project_name)
-                st.success("<placeholder> Added to registry")
-                st.rerun()
-
-            elif st.session_state.iteration < 3:
-                # Still ambiguous — another round
-                with st.spinner("Generating follow-up questions..."):
-                    analysis  = analyze_ambiguity(refined_text)
-                    questions = generate_clarification_questions(
-                        refined_text, analysis
-                    )
-                st.session_state.analysis         = analysis
-                st.session_state.questions        = questions
-                st.session_state.awaiting_answers = True
-                st.session_state.iteration        += 1
-                st.rerun()
-
-            else:
-                # Max iterations — force classify with GPT
-                with st.spinner("Force classifying..."):
-                    gpt_label   = gpt_second_opinion(refined_text)
-                    final_label = (
+            # If still ambiguous after clarification — force classify with GPT
+            if label == 'Ambiguous':
+                with st.spinner("Force classifying with GPT..."):
+                    gpt_label = gpt_second_opinion(refined_text)
+                    label     = (
                         gpt_label
                         if gpt_label and gpt_label != 'Ambiguous'
                         else 'NFR_Other'
                     )
-                st.warning(f"<placeholder> Max iterations reached — classified as {final_label}")
-                st.session_state.awaiting_answers = False
 
-                result = {
-                    'original_text': st.session_state.current_input,
-                    'final_text'   : refined_text,
-                    'label'        : final_label,
-                    'confidence'   : conf,
-                    'iterations'   : 3,
-                    'status'       : 'clarified'
-                }
-                add_to_registry(result, project_name)
-                st.success("<placeholder> Added to registry")
-                st.rerun()
+            # Grammar + quality check on refined text
+            with st.spinner("Checking requirement quality..."):
+                fixed_text, was_changed, issues = check_and_fix_requirement(refined_text)
+
+            if was_changed:
+                st.warning("<placeholder> **Quality issues fixed:**")
+                for issue in issues:
+                    st.markdown(f"  - {issue}")
+                refined_text = fixed_text
+
+            st.success(f"<placeholder> **Refined:** {refined_text}")
+            st.success(f"<placeholder> **Classified as:** {label} ({conf:.2%})")
+
+            result = {
+                'original_text': pending['text'],
+                'final_text'   : refined_text,
+                'label'        : label,
+                'confidence'   : conf,
+                'iterations'   : 1,
+                'status'       : 'clarified',
+            }
+            add_to_registry(result, project_name)
+
+            # Remove the processed item and move to next
+            st.session_state.pending_clarifications.pop(0)
+            st.session_state.registry_updated = True
+            st.rerun()
+
+        # Show how many are left
+        remaining = len(st.session_state.pending_clarifications)
+        if remaining > 1:
+            st.info(
+                f"After submitting, {remaining - 1} more requirement(s) "
+                f"will need clarification."
+            )
 
 # ════════════════════════════════════════════════════════════════════════
 # TAB 2 — Requirements Registry
@@ -362,23 +422,26 @@ with tab2:
     df = get_registry_df(project_name)
 
     if df.empty:
-        st.info("No requirements yet. Go to 'Elicit Requirements' to add some.")
+        st.info(
+            "No requirements yet. "
+            "Go to 'Elicit Requirements' to add some."
+        )
     else:
         # Summary metrics
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total",      len(df))
-        col2.metric("FR",         len(df[df['label'] == 'FR']))
-        col3.metric("NFR",        len(df[df['label'].str.startswith('NFR_', na=False)]))
-        col4.metric("Clarified",  len(df[df['status'] == 'clarified']))
+        col1.metric("Total",     len(df))
+        col2.metric("FR",        len(df[df['label'] == 'FR']))
+        col3.metric("NFR",       len(df[df['label'].str.startswith('NFR_', na=False)]))
+        col4.metric("Clarified", len(df[df['status'] == 'clarified']))
 
         st.divider()
 
-        # Filter
+        # Filter by label
         all_labels = ['All'] + sorted(df['label'].unique().tolist())
         selected   = st.selectbox("Filter by label", all_labels)
         filtered   = df if selected == 'All' else df[df['label'] == selected]
 
-        # Display table
+        # Table
         display_cols = ['final_text', 'label', 'confidence', 'status', 'timestamp']
         st.dataframe(
             filtered[display_cols].rename(columns={
@@ -386,7 +449,7 @@ with tab2:
                 'label'      : 'Label',
                 'confidence' : 'Confidence',
                 'status'     : 'Status',
-                'timestamp'  : 'Timestamp'
+                'timestamp'  : 'Timestamp',
             }),
             use_container_width = True,
             hide_index          = True
@@ -405,10 +468,8 @@ with tab2:
 with tab3:
     st.subheader("Generate SRS Document")
 
-    df = get_registry_df(project_name)
-    classified = df[
-        ~df['label'].isin(['Ambiguous', 'Requires Manual Review'])
-    ]
+    df         = get_registry_df(project_name)
+    classified = df[~df['label'].isin(['Ambiguous', 'Requires Manual Review'])]
 
     if classified.empty:
         st.warning("No classified requirements yet. Add requirements first.")
@@ -418,21 +479,21 @@ with tab3:
             f"classified requirements."
         )
 
-        # Project context form
         with st.expander("<placeholder> Project Details", expanded=True):
             col1, col2 = st.columns(2)
             with col1:
-                srs_project = st.text_input("Project Name", value=project_name)
-                srs_version = st.text_input("Version", value="1.0")
-                srs_org     = st.text_input("Organization", value="")
+                srs_project = st.text_input("Project Name",  value=project_name)
+                srs_version = st.text_input("Version",        value="1.0")
+                srs_org     = st.text_input("Organization",   value="")
             with col2:
-                srs_authors = st.text_input("Author(s)", value="")
+                srs_authors = st.text_input("Author(s)",      value="")
                 srs_status  = st.selectbox(
                     "Document Status",
                     ["Draft", "Review", "Approved", "Final"]
                 )
-                srs_desc    = st.text_area(
-                    "Project Description", height=80,
+                srs_desc = st.text_area(
+                    "Project Description",
+                    height=80,
                     placeholder="Brief description of the project..."
                 )
 
@@ -447,15 +508,22 @@ with tab3:
                 "authors"         : [srs_authors],
                 "document_status" : srs_status,
                 "description"     : srs_desc or f"Software requirements for {srs_project}",
-                "intended_users"  : ["Software developers", "Requirements engineers", "Project managers"],
-                "scope"           : srs_desc or f"This document defines the requirements for {srs_project}."
+                "intended_users"  : [
+                    "Software developers",
+                    "Requirements engineers",
+                    "Project managers",
+                ],
+                "scope": (
+                    srs_desc
+                    or f"This document defines the requirements for {srs_project}."
+                ),
             }
 
             with st.spinner("Generating SRS document — this may take 1-2 minutes..."):
-                progress = st.progress(0, text="Generating Introduction...")
-                progress.progress(25, text="Generating Overall Description...")
-                progress.progress(50, text="Generating Functional Requirements...")
-                progress.progress(75, text="Generating Non-Functional Requirements...")
+                progress = st.progress(0,  text="Generating Introduction...")
+                progress.progress(25,      text="Generating Overall Description...")
+                progress.progress(50,      text="Generating Functional Requirements...")
+                progress.progress(75,      text="Generating Non-Functional Requirements...")
 
                 output_path = generate_srs_from_registry(
                     project_name = project_name,
@@ -469,13 +537,21 @@ with tab3:
                 with open(output_path, 'rb') as f:
                     docx_bytes = f.read()
 
-                st.success("SRS document generated successfully!")
-
+                st.success("<placeholder> SRS document generated successfully!")
                 st.download_button(
                     label     = "<placeholder> Download SRS Document",
                     data      = docx_bytes,
-                    file_name = f"SRS_{srs_project.replace(' ', '_')}_v{srs_version}.docx",
-                    mime      = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    file_name = (
+                        f"SRS_{srs_project.replace(' ', '_')}"
+                        f"_v{srs_version}.docx"
+                    ),
+                    mime = (
+                        "application/vnd.openxmlformats-officedocument"
+                        ".wordprocessingml.document"
+                    ),
                 )
             else:
-                st.error("SRS generation failed — check your registry has requirements.")
+                st.error(
+                    "<placeholder> SRS generation failed — "
+                    "check your registry has requirements."
+                )
