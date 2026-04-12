@@ -18,11 +18,12 @@ from agent.clarification import (
     split_and_validate_input,
 )
 from agent.srs_generator import generate_srs_from_registry
+from PIL import Image
 
 # ── Page config ───────────────────────────────────────────────────────────
 st.set_page_config(
     page_title = "AI Requirements Elicitation Agent",
-    page_icon  = "<placeholder>",
+    page_icon  = "agent/agent_logo.png",
     layout     = "wide"
 )
 
@@ -88,7 +89,8 @@ for key, val in defaults.items():
 
 # ── Sidebar ───────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("<placeholder> Requirements Agent")
+    st.logo(image="agent/agent_logo.png", size="large", icon_image="agent/agent_logo.png")
+    st.title("Requirements Agent")
     st.divider()
 
     st.subheader("Project Settings")
@@ -104,17 +106,23 @@ with st.sidebar:
     # Always read fresh — reflects latest inserts immediately after st.rerun()
     sidebar_df = get_registry_df(project_name)
 
-    col_m1, col_m2 = st.columns(2)
-    col_m1.metric("Total",     len(sidebar_df))
-    col_m2.metric("Clarified", len(sidebar_df[sidebar_df['status'] == 'clarified']))
+    with st.container(border=True):
+        col_m1 = st.columns(1)[0]
+        col_m1.metric("**Total Requirements**", len(sidebar_df))
 
-    col_m3, col_m4 = st.columns(2)
-    col_m3.metric("FR",  len(sidebar_df[sidebar_df['label'] == 'FR']))
-    col_m4.metric("NFR", len(sidebar_df[
-        sidebar_df['label'].str.startswith('NFR_', na=False)
-    ]))
+        with st.container(border=True):
+            col_m2, col_m3 = st.columns(2)
+            col_m2.metric("Classified", len(sidebar_df[sidebar_df['status'] == 'classified']))
+            col_m3.metric("Clarified", len(sidebar_df[sidebar_df['status'] == 'clarified']))
 
-    if st.button("<placeholder> Clear Registry", type="secondary"):
+        with st.container(border=True):
+            col_m4, col_m5 = st.columns(2)
+            col_m4.metric("FR",  len(sidebar_df[sidebar_df['label'] == 'FR']))
+            col_m5.metric("NFR", len(sidebar_df[
+                sidebar_df['label'].str.startswith('NFR_', na=False)
+            ]))
+
+    if st.button("🗑️ Clear Registry", type="secondary"):
         clear_registry(project_name)
         st.session_state.registry_updated      = False
         st.session_state.pending_clarifications = []
@@ -130,9 +138,9 @@ st.title("AI Requirements Elicitation Agent")
 st.caption("Classify, clarify, and document software requirements automatically")
 
 tab1, tab2, tab3 = st.tabs([
-    "<placeholder> Elicit Requirements",
-    "<placeholder> Requirements Registry",
-    "<placeholder> Generate SRS",
+    "🔍 Elicit Requirements",
+    "📊 Requirements Registry",
+    "📄 Generate SRS",
 ])
 
 # ════════════════════════════════════════════════════════════════════════
@@ -162,7 +170,7 @@ with tab1:
             )
         )
 
-    classify_btn = st.button("<placeholder> Classify Requirement", type="primary")
+    classify_btn = st.button("Classify Requirement", type="primary")
 
     # ── New submission — reset all state ──────────────────────────────────
     if classify_btn and user_input.strip():
@@ -184,7 +192,7 @@ with tab1:
 
         if was_split:
             st.info(
-                f"<placeholder> Input contains **{split_result['split_count']} requirements** "
+                f"Input contains **{split_result['split_count']} requirements** "
                 f"— processing each separately."
             )
 
@@ -202,7 +210,7 @@ with tab1:
             if len(requirements_to_process) > 1:
                 st.markdown(f"**Requirement {i + 1} of {len(requirements_to_process)}:**")
 
-            st.markdown(f"<placeholder> `{req_text}`")
+            st.markdown(f"**Requirement:** `{req_text}`")
 
             # ── Classify this individual requirement ──────────────────────
             with st.spinner("Classifying..."):
@@ -213,11 +221,11 @@ with tab1:
             with col_a:
                 if label == 'Ambiguous' or is_vague:
                     st.warning(
-                        f"<placeholder> **Ambiguous** (confidence: {confidence:.2%})"
+                        f"**Ambiguous** (confidence: {confidence:.2%})"
                         + (f" — {reason}" if reason else "")
                     )
                 else:
-                    st.success(f"<placeholder> **{label}** ({confidence:.2%})")
+                    st.success(f"**{label}** ({confidence:.2%})")
             with col_b:
                 top_probs = dict(sorted(
                     all_probs.items(), key=lambda x: x[1], reverse=True
@@ -247,16 +255,16 @@ with tab1:
                             bert_conf = confidence
 
                     if assumption:
-                        st.info(f"<placeholder> **Assumed:** {assumption}")
-                    st.success(f"<placeholder> **Refined:** {refined}")
-                    st.success(f"<placeholder> **Label:** {final_label}")
+                        st.info(f"**Assumed:** {assumption}")
+                    st.success(f"**Refined:** {refined}")
+                    st.success(f"**Label:** {final_label}")
 
                     # Quality / grammar check
                     with st.spinner("Checking requirement quality..."):
                         fixed_text, was_changed, issues = check_and_fix_requirement(refined)
 
                     if was_changed:
-                        st.warning("<placeholder> **Quality issues detected and fixed:**")
+                        st.warning("**Quality issues detected and fixed:**")
                         for issue in issues:
                             st.markdown(f"  - {issue}")
                         st.markdown(f"**Original:** {refined}")
@@ -272,7 +280,7 @@ with tab1:
                         'status'       : 'clarified',
                     }
                     add_to_registry(result, project_name)
-                    st.success("<placeholder> Added to registry")
+                    st.success("Added to registry")
                     needs_rerun = True
 
                 else:
@@ -291,7 +299,7 @@ with tab1:
                         'questions': questions,       # stored — not regenerated
                     })
                     st.warning(
-                        "<placeholder> This requirement needs clarification — "
+                        "This requirement needs clarification — "
                         "scroll down to answer the questions."
                     )
 
@@ -302,23 +310,23 @@ with tab1:
                     fixed_text, was_changed, issues = check_and_fix_requirement(req_text)
 
                 if was_changed:
-                    st.warning("<placeholder> **Quality issues detected and fixed:**")
+                    st.warning("**Quality issues detected and fixed:**")
                     for issue in issues:
                         st.markdown(f"  - {issue}")
                     st.markdown(f"**Original:** {req_text}")
                     st.markdown(f"**Fixed:**    {fixed_text}")
-                    req_text = fixed_text      # use the fixed version
+                    req_text = fixed_text
 
                 result = {
                     'original_text': user_input.strip(),
-                    'final_text'   : req_text,   # ← fixed text, not raw input
+                    'final_text'   : req_text,
                     'label'        : label,
                     'confidence'   : confidence,
                     'iterations'   : 1,
                     'status'       : 'classified',
                 }
                 add_to_registry(result, project_name)
-                st.success(f"<placeholder> Added to registry as **{label}**")
+                st.success(f"Added to registry as **{label}**")
                 needs_rerun = True
 
         # ── Rerun ONCE after the entire loop — not inside it ─────────────
@@ -333,7 +341,7 @@ with tab1:
     # Questions are already stored in session state — no extra API calls.
     if st.session_state.pending_clarifications:
         st.divider()
-        st.markdown("### <placeholder> Clarification Required")
+        st.markdown("### Clarification Required")
 
         # Process one pending item at a time to keep the UI clean
         pending = st.session_state.pending_clarifications[0]
@@ -357,7 +365,7 @@ with tab1:
                 )
                 answers.append(answer)
 
-            submitted = st.form_submit_button("<placeholder> Submit Answers", type="primary")
+            submitted = st.form_submit_button("Submit Answers", type="primary")
 
         if submitted:
             current_text = pending['text']
@@ -382,13 +390,13 @@ with tab1:
                 fixed_text, was_changed, issues = check_and_fix_requirement(refined_text)
 
             if was_changed:
-                st.warning("<placeholder> **Quality issues fixed:**")
+                st.warning("**Quality issues fixed:**")
                 for issue in issues:
                     st.markdown(f"  - {issue}")
                 refined_text = fixed_text
 
-            st.success(f"<placeholder> **Refined:** {refined_text}")
-            st.success(f"<placeholder> **Classified as:** {label} ({conf:.2%})")
+            st.success(f"**Refined:** {refined_text}")
+            st.success(f"**Classified as:** {label} ({conf:.2%})")
 
             result = {
                 'original_text': pending['text'],
@@ -428,11 +436,13 @@ with tab2:
         )
     else:
         # Summary metrics
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total",     len(df))
-        col2.metric("FR",        len(df[df['label'] == 'FR']))
-        col3.metric("NFR",       len(df[df['label'].str.startswith('NFR_', na=False)]))
-        col4.metric("Clarified", len(df[df['status'] == 'clarified']))
+        with st.container(border=True):
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric("**Total Requirements**",     len(df))
+            col2.metric("FR",        len(df[df['label'] == 'FR']))
+            col3.metric("NFR",       len(df[df['label'].str.startswith('NFR_', na=False)]))
+            col4.metric("Classified", len(df[df['status'] == 'classified']))
+            col5.metric("Clarified", len(df[df['status'] == 'clarified']))
 
         st.divider()
 
@@ -479,7 +489,7 @@ with tab3:
             f"classified requirements."
         )
 
-        with st.expander("<placeholder> Project Details", expanded=True):
+        with st.expander("Project Details", expanded=True):
             col1, col2 = st.columns(2)
             with col1:
                 srs_project = st.text_input("Project Name",  value=project_name)
@@ -497,7 +507,7 @@ with tab3:
                     placeholder="Brief description of the project..."
                 )
 
-        generate_btn = st.button("<placeholder> Generate SRS Document", type="primary")
+        generate_btn = st.button("Generate SRS Document", type="primary")
 
         if generate_btn:
             context = {
@@ -537,9 +547,9 @@ with tab3:
                 with open(output_path, 'rb') as f:
                     docx_bytes = f.read()
 
-                st.success("<placeholder> SRS document generated successfully!")
+                st.success("SRS document generated successfully!")
                 st.download_button(
-                    label     = "<placeholder> Download SRS Document",
+                    label     = "Download SRS Document",
                     data      = docx_bytes,
                     file_name = (
                         f"SRS_{srs_project.replace(' ', '_')}"
@@ -552,6 +562,6 @@ with tab3:
                 )
             else:
                 st.error(
-                    "<placeholder> SRS generation failed — "
-                    "check your registry has requirements."
+                    "SRS generation failed — "
+                    "check your registry's requirements."
                 )
