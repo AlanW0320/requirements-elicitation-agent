@@ -1,4 +1,4 @@
-# AI Requirements Elicitation Agent
+# Requirements Elicitation Agent
 
 An AI-powered agent that classifies software requirements, clarifies vague stakeholder inputs through a dialogue loop, and generates structured Software Requirements Specification (SRS) documents automatically.
 
