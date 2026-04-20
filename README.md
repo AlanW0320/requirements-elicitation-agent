@@ -283,11 +283,4 @@ The datasets used for training are subject to their own respective licenses and 
 
 ---
 
-## Author
-
-**Alan Wong**   
-Final Year Project — AI Requirements Elicitation Agent for SMEs
-
----
-
 *Generated SRS documents are drafts intended to assist requirements engineers. Human review is recommended before finalising any SRS document produced by this system.*
