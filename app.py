@@ -62,6 +62,15 @@ def add_to_registry(result, project_name):
         conn.commit()
     conn.close()
 
+def rename_project(old_name, new_name):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        'UPDATE requirements SET project_name = ? WHERE project_name = ?',
+        (new_name, old_name)
+    )
+    conn.commit()
+    conn.close()
+
 def clear_registry(project_name):
     conn = sqlite3.connect(DB_PATH)
     conn.execute('DELETE FROM requirements WHERE project_name = ?', (project_name,))
@@ -82,6 +91,8 @@ defaults = {
     # pending_clarifications: list of dicts for interactive clarification
     # each dict: {text, reason, index, questions, analysis}
     'pending_clarifications': [],
+    'last_result'           : None,
+    'last_results'          : None,
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -98,6 +109,9 @@ with st.sidebar:
         "Project Name",
         value=st.session_state.project_name
     )
+    if project_name.strip() and project_name.strip() != st.session_state.project_name:
+        rename_project(st.session_state.project_name, project_name.strip())
+        project_name = project_name.strip()
     st.session_state.project_name = project_name
 
     st.divider()
@@ -159,6 +173,34 @@ with tab1:
             height=100,
             key="requirement_input"
         )
+        st.components.v1.html(
+            """
+            <script>
+            (function () {
+                const MIN_H = 100, MAX_H = 400;
+                function init() {
+                    const ta = window.parent.document.querySelector(
+                        'textarea[aria-label="Requirement"]'
+                    );
+                    if (!ta) { setTimeout(init, 150); return; }
+                    ta.style.minHeight = MIN_H + 'px';
+                    ta.style.maxHeight = MAX_H + 'px';
+                    ta.style.overflowY = 'hidden';
+                    function resize() {
+                        ta.style.height = 'auto';
+                        const h = Math.min(ta.scrollHeight, MAX_H);
+                        ta.style.height = h + 'px';
+                        ta.style.overflowY = ta.scrollHeight > MAX_H ? 'auto' : 'hidden';
+                    }
+                    ta.addEventListener('input', resize);
+                    resize();
+                }
+                setTimeout(init, 300);
+            })();
+            </script>
+            """,
+            height=0,
+        )
     with col2:
         st.markdown("##### Mode")
         mode = st.radio(
@@ -182,23 +224,36 @@ with tab1:
         st.session_state.refined_text           = None
         st.session_state.mode                   = mode
         st.session_state.pending_clarifications = []   # clear previous pending
+        st.session_state.last_result            = None
+        st.session_state.last_results           = None
 
         # ── Step 1: Split compound requirements ───────────────────────────
         with st.spinner("Analyzing input..."):
             split_result = split_and_validate_input(user_input.strip())
 
         requirements_to_process = split_result.get('requirements', [])
-        was_split               = split_result.get('was_split', False)
+        # Force was_split=True whenever the pre-splitter or GPT produced multiple items
+        was_split = split_result.get('was_split', False) or len(requirements_to_process) > 1
+        if len(requirements_to_process) > 1:
+            split_result['split_count'] = max(
+                split_result.get('split_count', 0), len(requirements_to_process)
+            )
 
         if was_split:
-            st.info(
-                f"Input contains **{split_result['split_count']} requirements** "
-                f"— processing each separately."
-            )
+            n = split_result.get('split_count', len(requirements_to_process))
+            if n > 5:
+                st.info(
+                    f"Input contained **{n} requirements** — each processed individually."
+                )
+            else:
+                st.info(
+                    f"Input contains **{n} requirements** — processing each separately."
+                )
 
         # ── Step 2: Process each requirement ─────────────────────────────
         # Collect all results first — only rerun AFTER the loop is complete
         needs_rerun = False
+        collected_results = []
 
         for i, req_item in enumerate(requirements_to_process):
             req_text = req_item['text']        # ← use req_text, NOT user_input
@@ -248,6 +303,7 @@ with tab1:
                             else 'NFR_Other'
                         )
                         refined, assumption = auto_refine_ambiguous(req_text, final_label)
+                        text_was_rewritten = refined.strip() != req_text.strip()
                         bert_label, bert_conf, _ = classify_requirement(refined)
                         if bert_label != 'Ambiguous' and bert_conf >= 0.75:
                             final_label = bert_label
@@ -258,6 +314,8 @@ with tab1:
                         st.info(f"**Assumed:** {assumption}")
                     st.success(f"**Refined:** {refined}")
                     st.success(f"**Label:** {final_label}")
+
+                    auto_refined_pre_grammar = refined   # save before grammar fix
 
                     # Quality / grammar check
                     with st.spinner("Checking requirement quality..."):
@@ -277,9 +335,31 @@ with tab1:
                         'label'        : final_label,
                         'confidence'   : bert_conf,
                         'iterations'   : 1,
-                        'status'       : 'clarified',
+                        'status'       : 'clarified' if text_was_rewritten else 'classified',
                     }
                     add_to_registry(result, project_name)
+                    collected_results.append({
+                        'original_input'      : user_input.strip(),
+                        'req_text'            : req_item['text'],
+                        'label'               : label,
+                        'confidence'          : confidence,
+                        'top_probs'           : top_probs,
+                        'is_vague'            : True,
+                        'reason'              : reason,
+                        'mode'                : 'Auto',
+                        'status'              : 'clarified' if text_was_rewritten else 'classified',
+                        'grammar_was_changed' : was_changed,
+                        'grammar_issues'      : issues,
+                        'grammar_original'    : auto_refined_pre_grammar,
+                        'grammar_fixed'       : fixed_text,
+                        'assumption'          : assumption,
+                        'auto_refined'        : auto_refined_pre_grammar,
+                        'final_label'         : final_label,
+                        'final_conf'          : bert_conf,
+                        'questions'           : None,
+                        'answers'             : None,
+                        'interactive_refined' : None,
+                    })
                     st.success("Added to registry")
                     needs_rerun = True
 
@@ -292,11 +372,14 @@ with tab1:
                         questions = generate_clarification_questions(req_text, analysis)
 
                     st.session_state.pending_clarifications.append({
-                        'text'     : req_text,
-                        'reason'   : reason,
-                        'index'    : i,
-                        'analysis' : analysis,
-                        'questions': questions,       # stored — not regenerated
+                        'text'      : req_text,
+                        'reason'    : reason,
+                        'index'     : i,
+                        'analysis'  : analysis,
+                        'questions' : questions,
+                        'label'     : label,
+                        'confidence': confidence,
+                        'top_probs' : top_probs,
                     })
                     st.warning(
                         "This requirement needs clarification — "
@@ -305,6 +388,8 @@ with tab1:
 
             # ── Route: Clear requirement ──────────────────────────────────
             else:
+                req_text_pre_grammar = req_text   # save before grammar fix
+
                 # Grammar + completeness check
                 with st.spinner("Checking requirement quality..."):
                     fixed_text, was_changed, issues = check_and_fix_requirement(req_text)
@@ -326,8 +411,36 @@ with tab1:
                     'status'       : 'classified',
                 }
                 add_to_registry(result, project_name)
+                collected_results.append({
+                    'original_input'      : user_input.strip(),
+                    'req_text'            : req_text_pre_grammar,
+                    'label'               : label,
+                    'confidence'          : confidence,
+                    'top_probs'           : top_probs,
+                    'is_vague'            : False,
+                    'reason'              : '',
+                    'mode'                : mode,
+                    'status'              : 'classified',
+                    'grammar_was_changed' : was_changed,
+                    'grammar_issues'      : issues,
+                    'grammar_original'    : req_text_pre_grammar,
+                    'grammar_fixed'       : fixed_text,
+                    'assumption'          : None,
+                    'auto_refined'        : None,
+                    'final_label'         : label,
+                    'final_conf'          : confidence,
+                    'questions'           : None,
+                    'answers'             : None,
+                    'interactive_refined' : None,
+                })
                 st.success(f"Added to registry as **{label}**")
                 needs_rerun = True
+
+        # ── Store collected results for persistent display ─────────────
+        if len(collected_results) == 1:
+            st.session_state.last_result  = collected_results[0]
+        elif len(collected_results) > 1:
+            st.session_state.last_results = collected_results
 
         # ── Rerun ONCE after the entire loop — not inside it ─────────────
         # Only rerun if there are no pending clarifications to show.
@@ -373,7 +486,8 @@ with tab1:
             with st.spinner("Refining requirement based on your answers..."):
                 refinement   = refine_requirement(current_text, questions, answers)
                 refined_text = refinement['refined_requirement']
-                label, conf, _ = classify_requirement(refined_text)
+                text_was_rewritten = refined_text.strip() != current_text.strip()
+                label, conf, all_probs_refined = classify_requirement(refined_text)
 
             # If still ambiguous after clarification — force classify with GPT
             if label == 'Ambiguous':
@@ -384,6 +498,8 @@ with tab1:
                         if gpt_label and gpt_label != 'Ambiguous'
                         else 'NFR_Other'
                     )
+
+            refined_text_pre_grammar = refined_text   # save before grammar fix
 
             # Grammar + quality check on refined text
             with st.spinner("Checking requirement quality..."):
@@ -404,9 +520,34 @@ with tab1:
                 'label'        : label,
                 'confidence'   : conf,
                 'iterations'   : 1,
-                'status'       : 'clarified',
+                'status'       : 'clarified' if text_was_rewritten else 'classified',
             }
             add_to_registry(result, project_name)
+
+            top_probs_refined = dict(sorted(
+                all_probs_refined.items(), key=lambda x: x[1], reverse=True
+            )[:5])
+            st.session_state.last_result = {
+                'original_input'      : pending['text'],
+                'req_text'            : pending['text'],
+                'label'               : pending.get('label', 'Ambiguous'),
+                'confidence'          : pending.get('confidence', 0.0),
+                'top_probs'           : pending.get('top_probs', top_probs_refined),
+                'is_vague'            : True,
+                'reason'              : pending.get('reason', ''),
+                'mode'                : 'Interactive',
+                'grammar_was_changed' : was_changed,
+                'grammar_issues'      : issues,
+                'grammar_original'    : refined_text_pre_grammar,
+                'grammar_fixed'       : fixed_text,
+                'assumption'          : None,
+                'auto_refined'        : None,
+                'final_label'         : label,
+                'final_conf'          : conf,
+                'questions'           : questions,
+                'answers'             : answers,
+                'interactive_refined' : refined_text_pre_grammar,
+            }
 
             # Remove the processed item and move to next
             st.session_state.pending_clarifications.pop(0)
@@ -420,6 +561,102 @@ with tab1:
                 f"After submitting, {remaining - 1} more requirement(s) "
                 f"will need clarification."
             )
+
+    # ── Persistent result display ──────────────────────────────────────────
+    if st.session_state.last_result is not None or st.session_state.last_results is not None:
+        st.divider()
+        st.markdown("### Last Processed Requirement")
+
+        results_to_display = (
+            st.session_state.last_results
+            if st.session_state.last_results is not None
+            else [st.session_state.last_result]
+        )
+
+        large_batch = len(results_to_display) > 5
+
+        # Show input text only for small batches (large inputs would be huge)
+        if not large_batch:
+            original_input_disp = results_to_display[0].get('original_input', '')
+            if original_input_disp:
+                st.markdown(f"**Input:** `{original_input_disp}`")
+
+        if large_batch:
+            st.info(
+                f"Input contained **{len(results_to_display)} requirements** "
+                f"— each processed individually."
+            )
+
+        def _render_result(res):
+            """Render the detail view for one result dict."""
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if res.get('label') == 'Ambiguous' or res.get('is_vague'):
+                    reason_str = res.get('reason', '')
+                    st.warning(
+                        f"**Ambiguous** (confidence: {res.get('confidence', 0.0):.2%})"
+                        + (f" — {reason_str}" if reason_str else "")
+                    )
+                else:
+                    st.success(
+                        f"**{res.get('label')}** ({res.get('confidence', 0.0):.2%})"
+                    )
+            with col_b:
+                top_probs_disp = res.get('top_probs', {})
+                if top_probs_disp:
+                    prob_df_disp = pd.DataFrame(
+                        list(top_probs_disp.items()), columns=['Label', 'Probability']
+                    )
+                    st.dataframe(prob_df_disp, hide_index=True, use_container_width=True)
+
+            if res.get('mode') == 'Auto' and res.get('is_vague'):
+                if res.get('assumption'):
+                    st.info(f"**Assumed:** {res['assumption']}")
+                if res.get('auto_refined'):
+                    st.success(f"**Refined:** {res['auto_refined']}")
+
+            if res.get('mode') == 'Interactive' and res.get('is_vague'):
+                questions_disp = res.get('questions') or []
+                answers_disp   = res.get('answers') or []
+                if questions_disp:
+                    st.markdown("**Clarification Q&A:**")
+                    for q_item, a_item in zip(questions_disp, answers_disp):
+                        st.markdown(f"- **Q:** {q_item['question']}")
+                        if a_item:
+                            st.markdown(f"  **A:** {a_item}")
+                if res.get('interactive_refined'):
+                    st.success(f"**Refined:** {res['interactive_refined']}")
+
+            if res.get('grammar_was_changed'):
+                st.warning("**Quality issues detected and fixed:**")
+                for issue in (res.get('grammar_issues') or []):
+                    st.markdown(f"  - {issue}")
+                st.markdown(f"**Original:** {res.get('grammar_original', '')}")
+                st.markdown(f"**Fixed:**    {res.get('grammar_fixed', '')}")
+
+            final_lbl = res.get('final_label', res.get('label', ''))
+            st.success(f"Added to registry as **{final_lbl}**")
+
+        for idx, res in enumerate(results_to_display):
+            final_label_disp = res.get('final_label', res.get('label', ''))
+            conf_disp        = res.get('final_conf',  res.get('confidence', 0.0))
+            status_disp      = res.get('status', 'classified')
+            req_full         = res.get('req_text', '')
+            req_short        = req_full[:60] + ('…' if len(req_full) > 60 else '')
+
+            if large_batch:
+                expander_label = (
+                    f"#{idx + 1}  {req_short}   ·   "
+                    f"{final_label_disp}  {conf_disp:.0%}   ·   {status_disp}"
+                )
+                with st.expander(expander_label):
+                    _render_result(res)
+            else:
+                if len(results_to_display) > 1:
+                    st.markdown(
+                        f"**Requirement {idx + 1} of {len(results_to_display)}:**"
+                    )
+                _render_result(res)
 
 # ════════════════════════════════════════════════════════════════════════
 # TAB 2 — Requirements Registry
