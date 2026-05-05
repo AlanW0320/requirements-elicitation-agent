@@ -642,7 +642,7 @@ with tab1:
             conf_disp        = res.get('final_conf',  res.get('confidence', 0.0))
             status_disp      = res.get('status', 'classified')
             req_full         = res.get('req_text', '')
-            req_short        = req_full[:60] + ('…' if len(req_full) > 60 else '')
+            req_short        = req_full[:200] + ('…' if len(req_full) > 200 else '')
 
             if large_batch:
                 expander_label = (
